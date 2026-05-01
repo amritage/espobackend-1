@@ -47,8 +47,8 @@ function getCacheKey(entityName, params = {}) {
 
   // For all records (used in fetchAllRecords)
   if (params.type === "all") {
-    const { orderBy = "", order = "" } = params;
-    return `${base}:all:${orderBy}:${order}`;
+    const { orderBy = "", order = "", select = "" } = params;
+    return `${base}:all:${orderBy}:${order}:${select}`;
   }
 
   return base;

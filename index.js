@@ -111,6 +111,31 @@ function mergeEntityLists(...lists) {
   return values;
 }
 
+function isServerlessRuntime() {
+  return !!String(
+    process.env.VERCEL ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME ||
+      process.env.NETLIFY ||
+      "",
+  ).trim();
+}
+
+function shouldRunStartupJobs(mode) {
+  const serverlessRuntime = isServerlessRuntime();
+  const allowServerlessJobs =
+    process.env.ALLOW_SERVERLESS_STARTUP_JOBS === "true";
+
+  if (serverlessRuntime && !allowServerlessJobs) {
+    return false;
+  }
+
+  if (mode === "local") {
+    return process.env.RUN_STARTUP_JOBS !== "false";
+  }
+
+  return process.env.RUN_STARTUP_JOBS === "true";
+}
+
 // Support separate public/private entity routing while keeping ESPO_ENTITIES as a fallback.
 const legacyEntities = parseCsvEnvList("ESPO_ENTITIES");
 const configuredPrivateEntities = parseCsvEnvList("PRIVATE_ESPO_ENTITIES");
@@ -307,7 +332,7 @@ if (require.main === module) {
       });
     });
 
-    const RUN_STARTUP_JOBS = process.env.RUN_STARTUP_JOBS !== "false";
+    const RUN_STARTUP_JOBS = shouldRunStartupJobs("local");
 
     if (RUN_STARTUP_JOBS) {
       // Start IndexNow scheduler
@@ -327,18 +352,24 @@ if (require.main === module) {
           });
       });
     } else {
-      console.log(
-        "\n[Startup] Skipping background jobs (RUN_STARTUP_JOBS=false)",
-      );
+      if (isServerlessRuntime()) {
+        console.log(
+          "\n[Startup] Skipping background jobs on serverless runtime",
+        );
+      } else {
+        console.log(
+          "\n[Startup] Skipping background jobs (RUN_STARTUP_JOBS=false)",
+        );
+      }
     }
 
     console.log("\n[Startup] Server ready!");
   });
 }
 
-// Start IndexNow scheduler for serverless environments
+// Start background jobs in production when explicitly enabled and allowed
 if (process.env.NODE_ENV === "production") {
-  const RUN_STARTUP_JOBS = process.env.RUN_STARTUP_JOBS === "true";
+  const RUN_STARTUP_JOBS = shouldRunStartupJobs("production");
 
   if (RUN_STARTUP_JOBS) {
     console.log(
@@ -361,7 +392,15 @@ if (process.env.NODE_ENV === "production") {
         });
     });
   } else {
-    console.log("[Startup] Skipping background jobs (RUN_STARTUP_JOBS=false)");
+    if (isServerlessRuntime() && process.env.RUN_STARTUP_JOBS === "true") {
+      console.log(
+        "[Startup] Skipping background jobs on serverless runtime (set ALLOW_SERVERLESS_STARTUP_JOBS=true to override)",
+      );
+    } else {
+      console.log(
+        "[Startup] Skipping background jobs (RUN_STARTUP_JOBS=false)",
+      );
+    }
     console.log("[Startup] Cache will populate on-demand as requests come in");
   }
 }

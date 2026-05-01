@@ -1,10 +1,34 @@
 const express = require("express");
 const router = express.Router();
 const { requireAdminToken } = require("../middleware/requireAdminToken");
+const { requireCronSecret } = require("../middleware/requireCronSecret");
 const {
   triggerManualIndexNow,
   testSitemapParsing,
 } = require("../utils/indexnowScheduler");
+
+async function startIndexNowRun(res, source) {
+  if (process.env.INDEXNOW_SCHEDULER_ENABLED !== "true") {
+    return res.status(200).json({
+      ok: true,
+      disabled: true,
+      message: "IndexNow scheduler is disabled",
+    });
+  }
+
+  console.log(`[IndexNow API] ${source} trigger requested`);
+
+  triggerManualIndexNow().catch((error) => {
+    console.error(`[IndexNow API] ${source} trigger failed:`, error.message);
+  });
+
+  return res.json({
+    ok: true,
+    message: "IndexNow trigger started",
+    source,
+    note: "Check server logs for progress",
+  });
+}
 
 /**
  * Health check for IndexNow configuration
@@ -73,29 +97,26 @@ router.get("/key", requireAdminToken, (req, res) => {
  */
 router.post("/trigger", requireAdminToken, async (req, res) => {
   try {
-    if (process.env.INDEXNOW_SCHEDULER_ENABLED !== "true") {
-      return res.status(200).json({
-        ok: true,
-        disabled: true,
-        message: "IndexNow scheduler is disabled",
-      });
-    }
-
-    console.log("[IndexNow API] Manual trigger requested");
-
-    // Trigger the scheduler manually (don't await to avoid timeout)
-    triggerManualIndexNow().catch((error) => {
-      console.error("[IndexNow API] Manual trigger failed:", error.message);
-    });
-
-    res.json({
-      ok: true,
-      message: "IndexNow manual trigger started",
-      note: "Check server logs for progress",
-    });
+    return startIndexNowRun(res, "admin");
   } catch (error) {
     console.error("[IndexNow API] Trigger error:", error);
     res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Cron trigger for Vercel Cron Jobs
+ * GET /indexnow/cron
+ */
+router.get("/cron", requireCronSecret, async (req, res) => {
+  try {
+    return startIndexNowRun(res, "cron");
+  } catch (error) {
+    console.error("[IndexNow API] Cron trigger error:", error);
+    return res.status(500).json({
       ok: false,
       error: error.message,
     });

@@ -110,6 +110,11 @@ function getMaxModifiedAt(records) {
   return maxValue;
 }
 
+function formatEspoDateTime(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+}
+
 const PUBLIC_API_DEFAULT_LIMIT = intInRange(
   process.env.PUBLIC_API_DEFAULT_LIMIT,
   20,
@@ -175,6 +180,29 @@ async function fetchRecordsPaged(entityName, { orderBy, order, select, where } =
   };
 }
 
+async function fetchEntityPage(
+  entityName,
+  { page = 1, limit = PUBLIC_API_DEFAULT_LIMIT, orderBy, order, select, where } = {},
+) {
+  const searchParams = {
+    maxSize: limit,
+    offset: (page - 1) * limit,
+  };
+
+  if (orderBy) searchParams.orderBy = orderBy;
+  if (order) searchParams.order = order;
+  if (select) searchParams.select = select;
+  if (Array.isArray(where) && where.length > 0) {
+    searchParams.where = where;
+  }
+
+  return espoRequest(`/${entityName}`, {
+    query: {
+      searchParams: JSON.stringify(searchParams),
+    },
+  });
+}
+
 // Helper: Merge records by ID (newer records override older ones)
 function mergeRecordsById(oldRecords, changedRecords) {
   const byId = new Map();
@@ -196,6 +224,7 @@ async function fetchAllRecords(entityName, { orderBy, order, select } = {}) {
     type: "all",
     orderBy: orderBy || "",
     order: order || "",
+    select: Array.isArray(select) ? select.join(",") : select || "",
   });
 
   if (fetchAllRecordsInflight.has(cacheKey)) {
@@ -622,7 +651,6 @@ const createEntityController = (entityName) => {
         1,
         PUBLIC_API_MAX_LIMIT,
       );
-      const offset = (page - 1) * limit;
 
       const populate =
         entityName === "CProduct" ||
@@ -636,24 +664,22 @@ const createEntityController = (entityName) => {
         entityName.toLowerCase() === "product" ||
         entityName.toLowerCase() === "cproduct"
       ) {
-        // fetch ALL (paged) instead of only 200
-        const data = await fetchAllRecords(entityName, {
+        const data = await fetchEntityPage(entityName, {
+          page,
+          limit,
           orderBy: req.query.orderBy,
           order: req.query.order,
           select: req.query.select,
+          where: [
+            {
+              type: "arrayAnyOf",
+              attribute: "merchTags",
+              value: ["ecatalogue"],
+            },
+          ],
         });
 
-        const filteredRecords = (data?.list ?? []).filter((record) => {
-          const merchTags = record.merchTags;
-          if (!merchTags || !Array.isArray(merchTags)) return false;
-          return merchTags.some((tag) => eqLoose(tag, "ecatalogue"));
-        });
-
-        const paginatedRecordsRaw = filteredRecords.slice(
-          offset,
-          offset + limit,
-        );
-        let paginatedRecords = paginatedRecordsRaw;
+        let paginatedRecords = data?.list ?? [];
 
         if (populate) {
           const populateConfig = getEntityPopulateConfig(entityName);
@@ -673,13 +699,13 @@ const createEntityController = (entityName) => {
         return res.json({
           success: true,
           data: paginatedRecords,
-          total: filteredRecords.length,
+          total: Math.max(0, data?.total ?? 0),
           entity: entityName,
-          filtered: "merchTags contains ecatalogue",
+          filtered: "merchTags arrayAnyOf ecatalogue",
           pagination: {
             page,
             limit,
-            totalPages: Math.ceil(filteredRecords.length / limit),
+            totalPages: Math.ceil((data?.total ?? 0) / limit),
           },
         });
       }
@@ -689,45 +715,27 @@ const createEntityController = (entityName) => {
         entityName.toLowerCase() === "blog" ||
         entityName.toLowerCase() === "cblog"
       ) {
-        const data = await fetchAllRecords(entityName, {
+        const data = await fetchEntityPage(entityName, {
+          page,
+          limit,
           orderBy: req.query.orderBy,
           order: req.query.order,
           select: req.query.select,
+          where: [
+            {
+              type: "equals",
+              attribute: "status",
+              value: "Approved",
+            },
+            {
+              type: "lessThanOrEquals",
+              attribute: "publishedAt",
+              value: formatEspoDateTime(new Date()),
+            },
+          ],
         });
 
-        const now = new Date();
-
-        const parseEspoDate = (v) => {
-          if (!v) return null;
-          if (v instanceof Date) return v;
-
-          const s = String(v).trim();
-          if (!s) return null;
-
-          let iso = s.includes("T") ? s : s.replace(" ", "T");
-          if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) iso = `${iso}T00:00:00`;
-
-          if (!/[zZ]$/.test(iso) && !/[+-]\d{2}:\d{2}$/.test(iso)) iso += "Z";
-
-          const d = new Date(iso);
-          return Number.isNaN(d.getTime()) ? null : d;
-        };
-
-        const filteredRecords = (data?.list ?? []).filter((record) => {
-          const status = normText(record.status ?? "");
-          if (status !== "approved") return false;
-
-          const pub = parseEspoDate(record.publishedAt);
-          if (!pub) return false;
-
-          return pub.getTime() <= now.getTime();
-        });
-
-        const paginatedRecordsRaw = filteredRecords.slice(
-          offset,
-          offset + limit,
-        );
-        let paginatedRecords = paginatedRecordsRaw;
+        let paginatedRecords = data?.list ?? [];
 
         if (populate) {
           const populateConfig = getEntityPopulateConfig(entityName);
@@ -747,26 +755,24 @@ const createEntityController = (entityName) => {
         return res.json({
           success: true,
           data: paginatedRecords,
-          total: filteredRecords.length,
+          total: Math.max(0, data?.total ?? 0),
           entity: entityName,
-          filtered: "status=Approved AND publishedAt<=now",
+          filtered: "status=Approved AND publishedAt<=now (EspoCRM where)",
           pagination: {
             page,
             limit,
-            totalPages: Math.ceil(filteredRecords.length / limit),
+            totalPages: Math.ceil((data?.total ?? 0) / limit),
           },
         });
       }
 
       // Default behavior (Espo paginated)
-      const data = await espoRequest(`/${entityName}`, {
-        query: {
-          maxSize: limit,
-          offset,
-          orderBy: req.query.orderBy,
-          order: req.query.order,
-          select: req.query.select,
-        },
+      const data = await fetchEntityPage(entityName, {
+        page,
+        limit,
+        orderBy: req.query.orderBy,
+        order: req.query.order,
+        select: req.query.select,
       });
 
       let records = data?.list ?? [];
@@ -947,7 +953,9 @@ const createEntityController = (entityName) => {
         });
       }
 
-      const data = await fetchAllRecords(entityName);
+      const data = await fetchAllRecords(entityName, {
+        select: fieldName,
+      });
 
       const uniqueValues = new Set();
 
@@ -1116,32 +1124,36 @@ const getDynamicSection = async (req, res) => {
       });
     }
 
-    const searchTerm = normText(merchtag);
+    const merchtagValue = cleanStr(merchtag);
 
-    // Fetch all TopicPage records
-    const topicPageData = await fetchAllRecords("CTopicPage", {
+    // Fetch matching TopicPage records directly from EspoCRM
+    const topicPageData = await fetchRecordsPaged("CTopicPage", {
       orderBy: req.query.orderBy,
       order: req.query.order,
+      where: [
+        {
+          type: "equals",
+          attribute: "slug",
+          value: merchtagValue,
+        },
+      ],
     });
 
-    // Fetch all Product records
-    const productData = await fetchAllRecords("CProduct", {
+    // Fetch matching Product records directly from EspoCRM
+    const productData = await fetchRecordsPaged("CProduct", {
       orderBy: req.query.orderBy,
       order: req.query.order,
+      where: [
+        {
+          type: "arrayAnyOf",
+          attribute: "merchTags",
+          value: [merchtagValue],
+        },
+      ],
     });
 
-    // Filter TopicPage records where slug matches merchtag
-    const matchingTopicPages = (topicPageData?.list ?? []).filter((record) => {
-      const slug = record.slug;
-      return slug && eqLoose(slug, searchTerm);
-    });
-
-    // Filter Product records where merchTags contains merchtag
-    let matchingProducts = (productData?.list ?? []).filter((record) => {
-      const merchTags = record.merchTags;
-      if (!merchTags || !Array.isArray(merchTags)) return false;
-      return merchTags.some((tag) => eqLoose(tag, searchTerm));
-    });
+    const matchingTopicPages = topicPageData?.list ?? [];
+    let matchingProducts = productData?.list ?? [];
 
     // Populate related data for products
     if (matchingProducts.length > 0) {
@@ -1201,12 +1213,14 @@ const getAllDynamicSections = async (req, res) => {
     const topicPageData = await fetchAllRecords("CTopicPage", {
       orderBy: req.query.orderBy,
       order: req.query.order,
+      select: "slug",
     });
 
     // Fetch all Product records
     const productData = await fetchAllRecords("CProduct", {
       orderBy: req.query.orderBy,
       order: req.query.order,
+      select: "merchTags",
     });
 
     const allTopicPages = topicPageData?.list ?? [];

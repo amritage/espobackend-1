@@ -1,4 +1,5 @@
 // controller/chatController.js
+const { createHmac, timingSafeEqual } = require("crypto");
 const { espoRequest } = require("./espoClient");
 
 /**
@@ -62,6 +63,117 @@ function parseCsvEnv(name) {
     .split(",")
     .map((x) => cleanStr(x))
     .filter(Boolean);
+}
+
+function base64UrlEncode(value) {
+  return Buffer.from(String(value || ""), "utf8").toString("base64url");
+}
+
+function base64UrlDecode(value) {
+  try {
+    return Buffer.from(String(value || ""), "base64url").toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function safeBufferEqual(a, b) {
+  const left = Buffer.from(String(a || ""), "utf8");
+  const right = Buffer.from(String(b || ""), "utf8");
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
+function getLeadTokenSecret() {
+  return cleanStr(process.env.CHAT_LEAD_TOKEN_SECRET || process.env.OTP_SECRET);
+}
+
+function signLeadTokenPayload(payload, secret) {
+  return createHmac("sha256", secret).update(payload).digest("base64url");
+}
+
+function createLeadToken(leadId) {
+  const normalizedLeadId = cleanStr(leadId);
+  const secret = getLeadTokenSecret();
+
+  if (!normalizedLeadId || !secret) return "";
+
+  const payload = base64UrlEncode(
+    JSON.stringify({
+      leadId: normalizedLeadId,
+      issuedAt: nowIso(),
+    }),
+  );
+  const signature = signLeadTokenPayload(payload, secret);
+
+  return `${payload}.${signature}`;
+}
+
+function extractLeadIdFromToken(token) {
+  const rawToken = cleanStr(token);
+  const secret = getLeadTokenSecret();
+
+  if (!rawToken || !secret) return "";
+
+  const parts = rawToken.split(".");
+  if (parts.length !== 2) return "";
+
+  const [payload, signature] = parts;
+  const expectedSignature = signLeadTokenPayload(payload, secret);
+
+  if (!safeBufferEqual(signature, expectedSignature)) return "";
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(base64UrlDecode(payload));
+  } catch {
+    return "";
+  }
+
+  const leadId = cleanStr(parsed?.leadId);
+  if (!leadId) return "";
+
+  const ttlDays = envInt("CHAT_LEAD_TOKEN_TTL_DAYS", 30);
+  if (ttlDays > 0) {
+    const issuedAtMs = Date.parse(cleanStr(parsed?.issuedAt));
+    if (
+      Number.isFinite(issuedAtMs) &&
+      Date.now() - issuedAtMs > ttlDays * 24 * 60 * 60 * 1000
+    ) {
+      return "";
+    }
+  }
+
+  return leadId;
+}
+
+function stripLeadIdentifiers(context) {
+  const next =
+    context && typeof context === "object" ? { ...context } : {};
+
+  delete next.leadId;
+  delete next.leadCaptureId;
+  delete next.leadToken;
+
+  return next;
+}
+
+function buildClientContext(context) {
+  const next = stripLeadIdentifiers(context);
+  const leadToken = createLeadToken(cleanStr(context?.leadId));
+
+  if (leadToken) {
+    next.leadToken = leadToken;
+  }
+
+  return next;
+}
+
+function getTrustedLeadId(sessionContext, incomingContext) {
+  const sessionLeadId = cleanStr(sessionContext?.leadId);
+  if (sessionLeadId) return sessionLeadId;
+
+  return extractLeadIdFromToken(incomingContext?.leadToken);
 }
 
 /** handles string OR array values */
@@ -640,6 +752,70 @@ function buildEmailAddressData(emailAddress) {
   return [{ emailAddress: e, primary: true, type: "Work" }];
 }
 
+async function findLeadIdByExactField(attribute, value) {
+  const normalizedValue = cleanStr(value);
+  if (!attribute || !normalizedValue) return "";
+
+  const data = await espoRequest(`/${LEAD_ENTITY}`, {
+    query: {
+      searchParams: JSON.stringify({
+        maxSize: 1,
+        orderBy: "modifiedAt",
+        order: "desc",
+        select: "id",
+        where: [
+          {
+            type: "equals",
+            attribute: "source",
+            value: "Chat Bot",
+          },
+          {
+            type: "equals",
+            attribute,
+            value: normalizedValue,
+          },
+        ],
+      }),
+    },
+  });
+
+  return cleanStr(data?.list?.[0]?.id);
+}
+
+async function findExistingChatLeadId(contactInfo) {
+  const email = cleanStr(contactInfo?.emailAddress).toLowerCase();
+  if (email) {
+    const id = await findLeadIdByExactField("emailAddress", email);
+    if (id) return id;
+  }
+
+  const phoneNumber = normalizePhoneForEspo(contactInfo?.phoneNumber);
+  if (phoneNumber) {
+    const id = await findLeadIdByExactField("phoneNumber", phoneNumber);
+    if (id) return id;
+  }
+
+  return "";
+}
+
+function sanitizeLeadUpsertForClient(result) {
+  if (!result || typeof result !== "object") return null;
+
+  const sanitized = {
+    ok: !!result.ok,
+    mode: cleanStr(result.mode) || undefined,
+  };
+
+  if (result.skipped) sanitized.skipped = true;
+  if (result.reason) sanitized.reason = cleanStr(result.reason);
+  if (result.retriedField) {
+    sanitized.retriedField = cleanStr(result.retriedField);
+  }
+  if (!result.ok && result.status) sanitized.status = result.status;
+
+  return sanitized;
+}
+
 /* ------------------------------ Lead upsert ------------------------------ */
 function buildLeadPayload(contactInfo) {
   const c = contactInfo || {};
@@ -793,8 +969,15 @@ async function upsertLeadSingleRecord(context, contactInfo) {
   }
 
   const payload = buildLeadPayload(contactInfo);
-  const existingId =
+  let existingId =
     cleanStr(context?.leadId) || cleanStr(context?.leadCaptureId);
+
+  if (!existingId) {
+    existingId = await findExistingChatLeadId(contactInfo);
+    if (existingId) {
+      context.leadId = existingId;
+    }
+  }
 
   // UPDATE
   if (existingId) {
@@ -1413,10 +1596,11 @@ function buildNonProductDetailsReply(entity, rec) {
 async function handleChatMessage(req, res) {
   const message = cleanStr(req.body?.message);
   const mode = cleanStr(req.body?.mode) || "auto";
-  const incomingContext =
+  const incomingContextRaw =
     req.body?.context && typeof req.body.context === "object"
       ? req.body.context
       : {};
+  const incomingContext = stripLeadIdentifiers(incomingContextRaw);
   const sessionId = cleanStr(req.body?.sessionId) || "";
 
   if (!message) {
@@ -1425,13 +1609,21 @@ async function handleChatMessage(req, res) {
 
   let sessionCtx = {};
   if (sessionId) sessionCtx = SESSION_STORE.get(sessionId) || {};
-  const context = { ...sessionCtx, ...incomingContext };
+  const trustedLeadId = getTrustedLeadId(sessionCtx, incomingContextRaw);
+  const context = {
+    ...stripLeadIdentifiers(sessionCtx),
+    ...incomingContext,
+    leadId: trustedLeadId || null,
+  };
 
   // 1) Parse intent + contact + query
   let action;
   let openaiParseOk = false;
   try {
-    action = await parseUserMessageWithOpenAI({ message, context });
+    action = await parseUserMessageWithOpenAI({
+      message,
+      context: stripLeadIdentifiers(context),
+    });
     openaiParseOk = true;
   } catch {
     action = {
@@ -1493,12 +1685,11 @@ async function handleChatMessage(req, res) {
   if (clientIp) mergedContact.cClientIP = clientIp;
   if (userAgent) mergedContact.cUserAgent = userAgent;
 
-  // 3) Preserve leadId
+  // 3) Preserve trusted lead state
   const nextContext = {
     ...context,
     contactInfo: mergedContact,
-    leadId:
-      cleanStr(context?.leadId) || cleanStr(context?.leadCaptureId) || null,
+    leadId: trustedLeadId || null,
     lastIntent: intent,
     lastItems: Array.isArray(context?.lastItems) ? context.lastItems : [],
   };
@@ -1519,6 +1710,9 @@ async function handleChatMessage(req, res) {
 
   // ✅ ensure leadId gets set even if caller didn’t mutate context somehow
   if (leadUpsert?.ok && leadUpsert?.id) nextContext.leadId = leadUpsert.id;
+
+  const clientContext = buildClientContext(nextContext);
+  const clientLeadUpsert = sanitizeLeadUpsertForClient(leadUpsert);
 
   // 5) Fetch multi-entity knowledge
   let items = [];
@@ -1754,7 +1948,7 @@ async function handleChatMessage(req, res) {
     replyText,
     suggestions,
     suggestionsV2,
-    context: nextContext,
+    context: clientContext,
     meta: {
       ts: nowIso(),
       intent,
@@ -1764,8 +1958,9 @@ async function handleChatMessage(req, res) {
       openaiParseOk,
       openaiReplyOk,
 
-      leadId: cleanStr(nextContext.leadId) || null,
-      leadUpsert, // ✅ debug
+      hasLead: !!cleanStr(nextContext.leadId),
+      leadTokenIssued: !!cleanStr(clientContext.leadToken),
+      leadUpsert: clientLeadUpsert,
 
       language,
       detail,

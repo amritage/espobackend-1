@@ -7,6 +7,6 @@
     { "src": "/(.*)", "dest": "/index.js" }
   ],
   "crons": [
-    { "path": "/health", "schedule": "0 2 */2 * *" }
+    { "path": "/api/indexnow/cron", "schedule": "0 2 * * *" }
   ]
 }

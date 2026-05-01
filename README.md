@@ -65,6 +65,7 @@ espobackend/
 │
 ├── middleware/
 │   ├── requireAdminToken.js        # Admin token protection
+│   ├── requireCronSecret.js        # Vercel cron protection
 │   └── rateLimit.js                # In-memory per-IP route limiting
 │
 └── utils/
@@ -126,11 +127,15 @@ Copy `.env.example` to `.env` and fill in your values. All variables are documen
 | `PUBLIC_API_DEFAULT_LIMIT` | Optional | Default page size for public list/search endpoints |
 | `PUBLIC_API_MAX_LIMIT` | Optional | Maximum allowed page size for public list/search endpoints |
 | `PUBLIC_API_MAX_PAGE` | Optional | Maximum allowed page number for public list/search endpoints |
+| `CHAT_LEAD_TOKEN_SECRET` | Optional | Secret used to sign browser-safe chat lead tokens |
+| `CHAT_LEAD_TOKEN_TTL_DAYS` | Optional | Chat lead token lifetime in days |
 | `OPENAI_API_KEY` | ⚠️ Optional | Enables AI chat; falls back to heuristic if missing |
 | `GMAIL_USER` | ⚠️ Optional | Gmail address for OTP emails |
 | `GMAIL_APP_PASSWORD` | ⚠️ Optional | Gmail App Password for OTP emails |
 | `OTP_SECRET` | ⚠️ Optional | HMAC secret for OTP hashing |
 | `INDEXNOW_KEY` | ⚠️ Optional | IndexNow ownership key |
+| `CRON_SECRET` | Optional | Secret Vercel sends to the cron endpoint as a bearer token |
+| `ALLOW_SERVERLESS_STARTUP_JOBS` | Optional | Explicitly allows in-process schedulers on serverless runtimes |
 | `NO_CACHE_ENTITIES` | ⚠️ Optional | Entities to skip long-term caching |
 | `CORS_ORIGIN` | ⚠️ Optional | Comma-separated allowed origins |
 
@@ -185,6 +190,7 @@ All routes are mounted under `/api`. Entity names from `PUBLIC_ESPO_ENTITIES` (o
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/indexnow/health` | Check IndexNow configuration |
+| `GET` | `/api/indexnow/cron` | Vercel cron trigger for IndexNow (CRON_SECRET required) |
 | `GET` | `/api/indexnow/key` | Get IndexNow key info (admin token required) |
 | `POST` | `/api/indexnow/trigger` | Manually trigger IndexNow submission (admin token required) |
 | `GET` | `/api/indexnow/test-sitemap` | Test sitemap URL parsing (admin token required) |
@@ -222,7 +228,7 @@ The application entry point. Responsibilities:
 - Mounts chat, admin-chat, auth, dynamicSection, indexnow, and cache routes
 - Exports `app` for Vercel serverless (no `listen` call needed)
 - In local dev (`require.main === module`), starts the HTTP server and triggers cache warm-up + IndexNow scheduler
-- In production with `RUN_STARTUP_JOBS=true`, also starts background jobs after serverless cold start
+- In production, skips in-process background jobs on serverless runtimes unless `ALLOW_SERVERLESS_STARTUP_JOBS=true`
 
 ---
 
@@ -245,7 +251,7 @@ A pre-deployment validation script run via `npm run build`. It does not compile 
 Vercel deployment configuration:
 
 - Routes all requests (`/(.*)`) to `index.js` as a single serverless function
-- Defines a cron job that pings `/health` every 2 days to keep the function warm and prevent cold starts
+- Defines a cron job that calls `/api/indexnow/cron` daily, authenticated by `CRON_SECRET`
 
 ---
 
@@ -271,7 +277,7 @@ The largest controller — handles read-only entity access, search, filtering, c
   - Does a delta refresh (only records changed since last fetch) if cache exists but is stale
   - Does a full refresh if cache is too old (beyond `ESPO_FULL_REFRESH_SECONDS`)
 - **`createEntityController(entityName)`** — factory that returns all route handlers for an entity:
-  - `getAllRecords` — paginated list with clamped `page` / `limit`; CProduct filters by `merchTags=ecatalogue`; CBlog filters by `status=Approved` and `publishedAt <= now`
+  - `getAllRecords` — paginated list with clamped `page` / `limit`; CProduct filters by `merchTags=ecatalogue` through EspoCRM `arrayAnyOf`; CBlog filters by `status=Approved` and `publishedAt <= now` through EspoCRM `where`
   - `getRecordById` — single record with cache
   - `getRecordsByFieldValue` — scans all records with loose Unicode-normalized comparison
   - `getUniqueFieldValues` — returns sorted unique values for any field across all records
@@ -288,6 +294,7 @@ Handles the public-facing AI chat assistant. Flow per request:
 1. Parses user message with OpenAI (`gpt-4o-mini` by default) to extract intent, search query, and contact info — falls back to a no-op structure if OpenAI is unavailable
 2. Merges extracted contact info with session context; enriches with heuristic email/phone/name extraction from message text
 3. Upserts a Lead record in EspoCRM with the collected contact info (create on first message, update on subsequent)
+   The browser receives a signed `leadToken` instead of a raw lead ID, so later requests can continue the same lead without trusting client-supplied record IDs
 4. Fetches candidate records from all `CHAT_ENTITIES` with concurrency limiting
 5. Scores and ranks records against the parsed query (keyword, color, weave, GSM, structure matching)
 6. Builds a structured reply plan based on intent (`availability`, `recommend`, `details`, `lead`, `smalltalk`)
@@ -366,9 +373,16 @@ Mounts dynamic section routes with CDN cache headers (`s-maxage=300`). Routes: `
 Mounts IndexNow management routes:
 
 - `GET /health` — validates all required IndexNow config is present
+- `GET /cron` — cron-safe trigger route secured by `CRON_SECRET`
 - `GET /key` — returns the key value and instructions for placing the key file on the frontend (admin token required)
 - `POST /trigger` — manually triggers a full sitemap fetch + IndexNow submission (admin token required)
 - `GET /test-sitemap` — fetches and parses the sitemap, returns found URLs for debugging (admin token required)
+
+---
+
+### `middleware/requireCronSecret.js`
+
+Protects the cron route by requiring `Authorization: Bearer ${CRON_SECRET}`. This matches how Vercel Cron Jobs send the shared secret.
 
 ---
 
@@ -494,7 +508,7 @@ Cryptographic OTP utilities:
 3. Add all environment variables from `.env.example` in the Vercel dashboard
 4. Deploy — Vercel uses `vercel.json` to route all requests to `index.js`
 
-For background jobs (cache warmer, IndexNow scheduler) on Vercel, set `RUN_STARTUP_JOBS=true`. Note that serverless functions are stateless — the in-memory cache resets on each cold start.
+On Vercel, prefer the cron route in `vercel.json` over in-process schedulers. Leave `RUN_STARTUP_JOBS=false` unless you are running in a persistent Node process or intentionally overriding serverless safeguards with `ALLOW_SERVERLESS_STARTUP_JOBS=true`.
 
 ---
 
