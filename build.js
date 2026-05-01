@@ -76,13 +76,15 @@ log("\n🔐 Checking Environment Configuration...", "cyan");
 
 // Load .env if exists
 if (fs.existsSync(".env")) {
-  require("dotenv").config();
+  const dotenv = require("dotenv");
+  const dotenvExpand = require("dotenv-expand");
+  dotenvExpand.expand(dotenv.config());
   checkPass("Found .env file");
 } else {
   checkWarn(".env file not found (will use environment variables)");
 }
 
-const requiredEnvVars = ["ESPO_BASE_URL", "ESPO_API_KEY", "ESPO_ENTITIES"];
+const requiredEnvVars = ["ESPO_BASE_URL", "ESPO_API_KEY"];
 
 const optionalEnvVars = [
   "PORT",
@@ -98,6 +100,14 @@ requiredEnvVars.forEach((envVar) => {
     checkFail(`Missing required environment variable: ${envVar}`);
   }
 });
+
+if (process.env.PUBLIC_ESPO_ENTITIES || process.env.ESPO_ENTITIES) {
+  checkPass("Entity routing is configured");
+} else {
+  checkFail(
+    "Missing entity configuration: set PUBLIC_ESPO_ENTITIES or ESPO_ENTITIES",
+  );
+}
 
 optionalEnvVars.forEach((envVar) => {
   if (process.env[envVar]) {

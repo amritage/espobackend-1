@@ -89,15 +89,6 @@ const createEntityRoutes = (entityName) => {
   // GET /:entity/:id - Get single record by ID
   router.get("/:id", publicCache(entityName), controller.getRecordById);
 
-  // POST /:entity - Create new record
-  router.post("/", controller.createRecord);
-
-  // PUT /:entity/:id - Update record by ID
-  router.put("/:id", controller.updateRecord);
-
-  // DELETE /:entity/:id - Delete record by ID
-  router.delete("/:id", controller.deleteRecord);
-
   return router;
 };
 

@@ -1,6 +1,34 @@
 const { espoRequest } = require("../controller/espoClient");
 const { getCacheKey, setCache } = require("./cache");
 
+function getMaxModifiedAt(records) {
+  let maxValue = null;
+  let maxMs = 0;
+
+  for (const record of records || []) {
+    const value = record?.modifiedAt;
+    if (!value) continue;
+
+    let iso = String(value).trim();
+    if (!iso) continue;
+
+    iso = iso.includes("T") ? iso : iso.replace(" ", "T");
+    if (!/[zZ]$/.test(iso) && !/[+-]\d{2}:\d{2}$/.test(iso)) {
+      iso += "Z";
+    }
+
+    const ms = Date.parse(iso);
+    if (!Number.isFinite(ms)) continue;
+
+    if (ms >= maxMs) {
+      maxMs = ms;
+      maxValue = value;
+    }
+  }
+
+  return maxValue;
+}
+
 /**
  * Warm up cache by pre-loading specified entities
  * This runs on server startup to ensure fast first requests
@@ -68,9 +96,17 @@ async function warmUpCache(entities) {
         if (list.length < pageSize) break;
       }
 
+      const now = Date.now();
       const result = {
         list: all,
         total: total !== null ? total : all.length,
+        _cacheMeta: {
+          lastFullFetchAt: now,
+          lastRefreshAt: now,
+          maxModifiedAt: getMaxModifiedAt(all),
+          refreshType: "warmup",
+          totalRecordsFetched: all.length,
+        },
       };
 
       // Store in cache

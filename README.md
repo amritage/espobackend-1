@@ -1,12 +1,12 @@
 # EspoCRM Node.js Backend API
 
-A production-ready Node.js/Express backend that acts as a smart middleware layer between [EspoCRM](https://www.espocrm.com/) and your frontend applications. It exposes EspoCRM entities as clean REST API endpoints, adds intelligent in-memory caching with delta refresh, an AI-powered chat assistant, OTP-based authentication, Cloudinary image optimization, IndexNow SEO pinging, and admin audit tools — all deployable to Vercel as a serverless function.
+A production-ready Node.js/Express backend that acts as a smart middleware layer between [EspoCRM](https://www.espocrm.com/) and your frontend applications. It exposes EspoCRM entities as read-only REST API endpoints, adds intelligent in-memory caching with delta refresh, an AI-powered chat assistant, OTP-based authentication, Cloudinary image optimization, IndexNow SEO pinging, and admin audit tools — all deployable to Vercel as a serverless function.
 
 ---
 
 ## Features
 
-- **Generic REST API** — auto-generates CRUD endpoints for any EspoCRM entity defined in `.env`
+- **Generic REST API** — auto-generates read-only endpoints for any EspoCRM entity defined in `.env`
 - **Smart Caching** — in-memory cache with delta refresh (only fetches changed records), full refresh, and per-entity TTL control
 - **AI Chat Assistant** — OpenAI-powered public chat that searches your catalogue and captures leads into EspoCRM
 - **Admin Audit Chat** — internal chat tool for querying and exporting any entity to Excel
@@ -15,7 +15,6 @@ A production-ready Node.js/Express backend that acts as a smart middleware layer
 - **IndexNow Scheduler** — automatically pings search engines with your sitemap URLs on a cron schedule
 - **Dynamic Sections** — cross-entity endpoint that matches `TopicPage.slug` with `Product.merchTags`
 - **Cache Management API** — endpoints to inspect, clear, and manage cache at runtime
-- **Frontend Revalidation** — notifies Next.js ISR frontends to revalidate after data changes
 - **Security** — Helmet headers, CORS with multi-origin support, rate limiting, request timeout, exponential backoff retry
 
 ---
@@ -50,7 +49,7 @@ espobackend/
 │
 ├── controller/
 │   ├── espoClient.js               # EspoCRM HTTP client (rate limit, retry, dedup)
-│   ├── genericController.js        # CRUD + search + dynamic section logic
+│   ├── genericController.js        # Read-only entity, search, and dynamic section logic
 │   ├── chatController.js           # Public AI chat assistant handler
 │   ├── adminChatController.js      # Admin audit chat + Excel export handler
 │   └── authController.js          # OTP register / login / verify logic
@@ -72,8 +71,7 @@ espobackend/
     ├── indexnow.js                 # IndexNow HTTP submission utility
     ├── indexnowScheduler.js        # Cron scheduler + sitemap parser for IndexNow
     ├── mailer.js                   # OTP email template + Gmail transporter
-    ├── otp.js                      # OTP generation, hashing, verification
-    └── revalidateFrontends.js      # Next.js ISR revalidation trigger
+    └── otp.js                      # OTP generation, hashing, verification
 ```
 
 ---
@@ -113,14 +111,15 @@ Copy `.env.example` to `.env` and fill in your values. All variables are documen
 |---|---|---|
 | `ESPO_BASE_URL` | ✅ | Your EspoCRM instance URL |
 | `ESPO_API_KEY` | ✅ | EspoCRM API key (Admin → API Keys) |
-| `ESPO_ENTITIES` | ✅ | Comma-separated entity names to expose |
-| `FRONTEND_URL` | ✅ | Primary frontend URL (CORS + revalidation) |
+| `PUBLIC_ESPO_ENTITIES` | ✅ | Comma-separated public entity names to expose |
+| `PRIVATE_ESPO_ENTITIES` | Optional | Admin-only entity names, if you intentionally enable private reads |
+| `ESPO_ENTITIES` | Optional | Backward-compatible fallback for public entity routing |
+| `FRONTEND_URL` | ✅ | Primary frontend URL (CORS, sitemap, and frontend links) |
 | `OPENAI_API_KEY` | ⚠️ Optional | Enables AI chat; falls back to heuristic if missing |
 | `GMAIL_USER` | ⚠️ Optional | Gmail address for OTP emails |
 | `GMAIL_APP_PASSWORD` | ⚠️ Optional | Gmail App Password for OTP emails |
 | `OTP_SECRET` | ⚠️ Optional | HMAC secret for OTP hashing |
 | `INDEXNOW_KEY` | ⚠️ Optional | IndexNow ownership key |
-| `REVALIDATE_SECRET` | ⚠️ Optional | Shared secret for Next.js ISR revalidation |
 | `NO_CACHE_ENTITIES` | ⚠️ Optional | Entities to skip long-term caching |
 | `CORS_ORIGIN` | ⚠️ Optional | Comma-separated allowed origins |
 
@@ -128,7 +127,7 @@ Copy `.env.example` to `.env` and fill in your values. All variables are documen
 
 ## API Reference
 
-All routes are mounted under `/api`. Entity names from `ESPO_ENTITIES` are lowercased and the leading `C` prefix is stripped (e.g. `CProduct` → `/api/product`).
+All routes are mounted under `/api`. Entity names from `PUBLIC_ESPO_ENTITIES` (or fallback `ESPO_ENTITIES`) are lowercased and the leading `C` prefix is stripped (e.g. `CProduct` → `/api/product`).
 
 ### Generic Entity Routes
 
@@ -136,9 +135,6 @@ All routes are mounted under `/api`. Entity names from `ESPO_ENTITIES` are lower
 |---|---|---|
 | `GET` | `/api/:entity` | Get all records (paginated) |
 | `GET` | `/api/:entity/:id` | Get single record by ID |
-| `POST` | `/api/:entity` | Create new record |
-| `PUT` | `/api/:entity/:id` | Update record |
-| `DELETE` | `/api/:entity/:id` | Delete record |
 | `GET` | `/api/:entity/fieldname/:fieldName` | Get all unique values for a field |
 | `GET` | `/api/:entity/fieldname/:fieldName/:fieldValue` | Get records filtered by field value |
 | `GET` | `/api/:entity/search/:searchValue` | Search records by keyword or title |
@@ -211,7 +207,7 @@ The application entry point. Responsibilities:
 
 - Loads `.env` in non-production environments using `dotenv-expand` (supports variable references like `${FRONTEND_URL}`)
 - Configures Express with `helmet`, `cors`, `express.json()`, and request logging middleware
-- Reads `ESPO_ENTITIES` from env and dynamically registers all entity routes under `/api`
+- Reads `PUBLIC_ESPO_ENTITIES` / `PRIVATE_ESPO_ENTITIES` (with `ESPO_ENTITIES` as fallback) and dynamically registers entity routes under `/api`
 - Mounts chat, admin-chat, auth, dynamicSection, indexnow, and cache routes
 - Exports `app` for Vercel serverless (no `listen` call needed)
 - In local dev (`require.main === module`), starts the HTTP server and triggers cache warm-up + IndexNow scheduler
@@ -224,7 +220,7 @@ The application entry point. Responsibilities:
 A pre-deployment validation script run via `npm run build`. It does not compile anything — it validates the project is ready to deploy:
 
 - Checks all required files exist
-- Validates required environment variables are set
+- Validates required environment variables are set, including public entity routing config
 - Checks `node_modules` is installed
 - Does a basic `require()` syntax check on core files
 - Verifies `.gitignore` includes `.env`
@@ -257,7 +253,7 @@ The core HTTP client for all EspoCRM API communication. Features:
 
 ### `controller/genericController.js`
 
-The largest controller — handles all entity CRUD, search, filtering, caching, and dynamic sections. Key parts:
+The largest controller — handles read-only entity access, search, filtering, caching, and dynamic sections. Key parts:
 
 - **`fetchAllRecords(entityName)`** — fetches all records with a 3-tier cache strategy:
   - Serves from cache if fresh (within `ESPO_DELTA_REFRESH_SECONDS`)
@@ -266,7 +262,6 @@ The largest controller — handles all entity CRUD, search, filtering, caching, 
 - **`createEntityController(entityName)`** — factory that returns all route handlers for an entity:
   - `getAllRecords` — paginated list; CProduct filters by `merchTags=ecatalogue`; CBlog filters by `status=Approved` and `publishedAt <= now`
   - `getRecordById` — single record with cache
-  - `createRecord` / `updateRecord` / `deleteRecord` — write operations that invalidate cache and trigger frontend revalidation
   - `getRecordsByFieldValue` — scans all records with loose Unicode-normalized comparison
   - `getUniqueFieldValues` — returns sorted unique values for any field across all records
   - `getBySearchProduct` — keyword/title search across all records
@@ -322,9 +317,9 @@ OTP fields stored on the EspoCRM record: `otphash`, `otpexpiresat`, `otplastsent
 
 ### `routes/generic.js`
 
-Route factory for entity endpoints. For each entity:
+Route factory for read-only entity endpoints. For each entity:
 
-- Creates an Express router with all 7 CRUD + search routes
+- Creates an Express router with list, detail, search, and field-filter routes
 - Applies `publicCache` middleware on GET routes — sets `Cache-Control` and `Vercel-CDN-Cache-Control` headers for Vercel edge caching (`s-maxage=300, stale-while-revalidate=86400`)
 - Skips CDN caching for entities listed in `NO_CACHE_ENTITIES`
 - Exports `createEntityRoutes(entityName)` used by `index.js`
@@ -472,15 +467,6 @@ Cryptographic OTP utilities:
 - **`timingSafeEqual(a, b)`** — constant-time string comparison using `crypto.timingSafeEqual` to prevent timing attacks
 - **`parseEspoDate(str)`** — converts EspoCRM datetime format (`YYYY-MM-DD HH:mm:ss`) to a JavaScript `Date`
 - **`formatEspoDate(date)`** — converts a JavaScript `Date` back to EspoCRM datetime format
-
----
-
-### `utils/revalidateFrontends.js`
-
-Triggers Next.js ISR (Incremental Static Regeneration) revalidation after any data write:
-
-- **`revalidateFrontends()`** — POSTs to `FRONTEND_URL/api/revalidate` and optionally `FRONTEND_B_REVALIDATE_URL` in parallel using `Promise.allSettled` (failures are silently ignored so they never block a write operation)
-- Called automatically by `createRecord`, `updateRecord`, and `deleteRecord` in `genericController.js`
 
 ---
 
