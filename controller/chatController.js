@@ -65,6 +65,24 @@ function parseCsvEnv(name) {
     .filter(Boolean);
 }
 
+function uniqueEnvList(values) {
+  const seen = new Set();
+  const out = [];
+
+  for (const value of values || []) {
+    const cleaned = cleanStr(value);
+    if (!cleaned) continue;
+
+    const key = norm(cleaned);
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    out.push(cleaned);
+  }
+
+  return out;
+}
+
 function base64UrlEncode(value) {
   return Buffer.from(String(value || ""), "utf8").toString("base64url");
 }
@@ -314,10 +332,19 @@ function getPageUrl(req) {
 /* ------------------------------ choose chat entities dynamically ------------------------------ */
 function getChatEntities() {
   const chat = parseCsvEnv("CHAT_ENTITIES");
-  if (chat.length) return chat;
+  if (chat.length) return uniqueEnvList(chat);
 
-  const all = parseCsvEnv("ESPO_ENTITIES");
-  const filtered = all.filter((e) => norm(e) !== "lead");
+  const privateEntities = new Set(
+    parseCsvEnv("PRIVATE_ESPO_ENTITIES").map((entity) => norm(entity)),
+  );
+  const legacyEntities = parseCsvEnv("ESPO_ENTITIES");
+  const configuredPublicEntities = parseCsvEnv("PUBLIC_ESPO_ENTITIES");
+  const publicEntities = (
+    configuredPublicEntities.length ? configuredPublicEntities : legacyEntities
+  ).filter((entity) => !privateEntities.has(norm(entity)));
+  const filtered = uniqueEnvList(publicEntities).filter(
+    (entity) => norm(entity) !== "lead",
+  );
   if (filtered.length) return filtered;
 
   return ["CProduct"];
@@ -1302,24 +1329,54 @@ async function fetchEntityList(entity) {
   const e = cleanStr(entity);
   if (!e) return [];
 
-  const maxSizeDefault = Number(process.env.CHAT_ENTITY_MAX_SIZE || 120);
-  const perEntityKey = `CHAT_MAX_SIZE_${e.toUpperCase()}`;
-  const maxSize = Number(process.env[perEntityKey] || maxSizeDefault);
-
+  const maxTotalDefault = envInt("CHAT_ENTITY_MAX_SIZE", 120);
+  const maxTotalKey = `CHAT_MAX_SIZE_${e.toUpperCase()}`;
+  const maxTotal = envInt(maxTotalKey, maxTotalDefault);
+  const pageSizeDefault = envInt(
+    "CHAT_ENTITY_PAGE_SIZE",
+    Math.min(maxTotal, maxTotalDefault),
+  );
+  const pageSizeKey = `CHAT_PAGE_SIZE_${e.toUpperCase()}`;
+  const pageSize = Math.max(
+    1,
+    Math.min(maxTotal, envInt(pageSizeKey, pageSizeDefault)),
+  );
   const orderBy = cleanStr(process.env.CHAT_ENTITY_ORDER_BY || "modifiedAt");
   const order = cleanStr(process.env.CHAT_ENTITY_ORDER || "desc");
 
-  try {
-    const data = await espoRequest(`/${e}`, {
-      query: { maxSize, offset: 0, orderBy, order },
-    });
-    return Array.isArray(data?.list) ? data.list : [];
-  } catch {
-    const data = await espoRequest(`/${e}`, {
-      query: { maxSize, offset: 0 },
-    });
-    return Array.isArray(data?.list) ? data.list : [];
+  let offset = 0;
+  let total = null;
+  let all = [];
+
+  while (all.length < maxTotal) {
+    const remaining = maxTotal - all.length;
+    const currentPageSize = Math.max(1, Math.min(pageSize, remaining));
+
+    let data = null;
+    try {
+      data = await espoRequest(`/${e}`, {
+        query: { maxSize: currentPageSize, offset, orderBy, order },
+      });
+    } catch {
+      data = await espoRequest(`/${e}`, {
+        query: { maxSize: currentPageSize, offset },
+      });
+    }
+
+    const list = Array.isArray(data?.list) ? data.list : [];
+    if (total === null && typeof data?.total === "number") {
+      total = data.total;
+    }
+
+    all = all.concat(list);
+    offset += list.length;
+
+    if (!list.length) break;
+    if (total !== null && offset >= total) break;
+    if (list.length < currentPageSize) break;
   }
+
+  return all;
 }
 
 async function fetchCandidateItems() {

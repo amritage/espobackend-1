@@ -92,6 +92,37 @@ function parseEspoDateMs(value) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+function compareFieldValues(leftValue, rightValue) {
+  if (leftValue === rightValue) return 0;
+  if (leftValue === null || leftValue === undefined) return 1;
+  if (rightValue === null || rightValue === undefined) return -1;
+
+  if (typeof leftValue === "number" && typeof rightValue === "number") {
+    return leftValue - rightValue;
+  }
+
+  const leftDate = parseEspoDateMs(leftValue);
+  const rightDate = parseEspoDateMs(rightValue);
+  if (leftDate && rightDate) {
+    return leftDate - rightDate;
+  }
+
+  return String(leftValue).localeCompare(String(rightValue), undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function sortRecords(records, orderBy, order) {
+  if (!orderBy) return records;
+
+  const direction = cleanStr(order).toLowerCase() === "desc" ? -1 : 1;
+  return [...(records || [])].sort((left, right) => {
+    const compared = compareFieldValues(left?.[orderBy], right?.[orderBy]);
+    return compared * direction;
+  });
+}
+
 // Helper: Get maximum modifiedAt value from records
 function getMaxModifiedAt(records) {
   let maxValue = null;
@@ -203,6 +234,19 @@ async function fetchEntityPage(
   });
 }
 
+async function fetchEntityTotal(entityName) {
+  const data = await espoRequest(`/${entityName}`, {
+    query: {
+      searchParams: JSON.stringify({
+        maxSize: 1,
+        offset: 0,
+      }),
+    },
+  });
+
+  return typeof data?.total === "number" ? data.total : null;
+}
+
 // Helper: Merge records by ID (newer records override older ones)
 function mergeRecordsById(oldRecords, changedRecords) {
   const byId = new Map();
@@ -250,11 +294,45 @@ async function fetchAllRecords(entityName, { orderBy, order, select } = {}) {
     );
 
     const now = Date.now();
+    const runFullRefresh = async (reason = "") => {
+      if (reason) {
+        console.log(`[fetchAllRecords] ${entityName} - full refresh (${reason})`);
+      } else {
+        console.log(`[fetchAllRecords] ${entityName} - full refresh`);
+      }
+
+      const fullData = await fetchRecordsPaged(entityName, {
+        orderBy,
+        order,
+        select,
+      });
+
+      const sortedList = sortRecords(fullData.list, orderBy, order);
+      const result = {
+        list: sortedList,
+        total: fullData.total,
+        _cacheMeta: {
+          lastFullFetchAt: Date.now(),
+          lastRefreshAt: Date.now(),
+          maxModifiedAt: getMaxModifiedAt(sortedList),
+          refreshType: "full",
+          totalRecordsFetched: sortedList?.length || 0,
+        },
+      };
+
+      setCache(cacheKey, result, cacheTtlSeconds, entityName);
+      console.log(
+        `[fetchAllRecords] ${entityName} - full refresh complete: ${sortedList?.length || 0} records`,
+      );
+
+      return result;
+    };
 
     if (cached) {
       const meta = cached._cacheMeta || {};
       const lastRefreshAt = Number(meta.lastRefreshAt || meta.lastFullFetchAt || 0);
       const lastFullFetchAt = Number(meta.lastFullFetchAt || 0);
+      const cachedList = Array.isArray(cached.list) ? cached.list : [];
 
       const isDeltaFresh = now - lastRefreshAt < deltaRefreshSeconds * 1000;
       const needsFullRefresh = now - lastFullFetchAt > fullRefreshSeconds * 1000;
@@ -265,8 +343,22 @@ async function fetchAllRecords(entityName, { orderBy, order, select } = {}) {
       }
 
       if (!needsFullRefresh) {
+        let currentTotal = null;
+        try {
+          currentTotal = await fetchEntityTotal(entityName);
+        } catch (error) {
+          console.warn(
+            `[fetchAllRecords] Unable to probe total for ${entityName}; continuing with delta refresh:`,
+            error.message,
+          );
+        }
+
+        if (currentTotal !== null && currentTotal < cachedList.length) {
+          return runFullRefresh("delete detected");
+        }
+
         const lastModifiedAt =
-          meta.maxModifiedAt || getMaxModifiedAt(cached.list || []);
+          meta.maxModifiedAt || getMaxModifiedAt(cachedList);
 
         if (lastModifiedAt) {
           try {
@@ -284,11 +376,16 @@ async function fetchAllRecords(entityName, { orderBy, order, select } = {}) {
               ],
             });
 
-            const mergedList = mergeRecordsById(cached.list || [], deltaData.list || []);
+            let mergedList = mergeRecordsById(cachedList, deltaData.list || []);
+            mergedList = sortRecords(mergedList, orderBy, order);
+
+            if (currentTotal !== null && mergedList.length !== currentTotal) {
+              return runFullRefresh("count drift detected");
+            }
 
             const result = {
               list: mergedList,
-              total: mergedList.length,
+              total: currentTotal !== null ? currentTotal : mergedList.length,
               _cacheMeta: {
                 lastFullFetchAt,
                 lastRefreshAt: Date.now(),
@@ -311,31 +408,11 @@ async function fetchAllRecords(entityName, { orderBy, order, select } = {}) {
           }
         }
       }
+
+      return runFullRefresh("stale cache window elapsed");
     }
 
-    console.log(`[fetchAllRecords] ${entityName} - full refresh`);
-    const fullData = await fetchRecordsPaged(entityName, {
-      orderBy,
-      order,
-      select,
-    });
-
-    const result = {
-      list: fullData.list,
-      total: fullData.total,
-      _cacheMeta: {
-        lastFullFetchAt: Date.now(),
-        lastRefreshAt: Date.now(),
-        maxModifiedAt: getMaxModifiedAt(fullData.list),
-        refreshType: "full",
-        totalRecordsFetched: fullData.list?.length || 0,
-      },
-    };
-
-    setCache(cacheKey, result, cacheTtlSeconds, entityName);
-    console.log(`[fetchAllRecords] ${entityName} - full refresh complete: ${fullData.list?.length || 0} records`);
-
-    return result;
+    return runFullRefresh();
   })();
 
   fetchAllRecordsInflight.set(cacheKey, task);
@@ -1152,8 +1229,31 @@ const getDynamicSection = async (req, res) => {
       ],
     });
 
-    const matchingTopicPages = topicPageData?.list ?? [];
+    let matchingTopicPages = topicPageData?.list ?? [];
     let matchingProducts = productData?.list ?? [];
+
+    if (matchingTopicPages.length === 0) {
+      const fallbackTopicPages = await fetchAllRecords("CTopicPage", {
+        orderBy: req.query.orderBy,
+        order: req.query.order,
+      });
+
+      matchingTopicPages = (fallbackTopicPages?.list ?? []).filter((record) =>
+        eqLoose(record?.slug, merchtagValue),
+      );
+    }
+
+    if (matchingProducts.length === 0) {
+      const fallbackProducts = await fetchAllRecords("CProduct", {
+        orderBy: req.query.orderBy,
+        order: req.query.order,
+      });
+
+      matchingProducts = (fallbackProducts?.list ?? []).filter((record) =>
+        Array.isArray(record?.merchTags) &&
+        record.merchTags.some((tag) => eqLoose(tag, merchtagValue)),
+      );
+    }
 
     // Populate related data for products
     if (matchingProducts.length > 0) {
@@ -1227,10 +1327,14 @@ const getAllDynamicSections = async (req, res) => {
     const allProducts = productData?.list ?? [];
 
     // Create a set of all TopicPage slugs (normalized)
-    const topicPageSlugs = new Set();
+    const topicPageSlugs = new Map();
     allTopicPages.forEach((tp) => {
-      if (tp.slug) {
-        topicPageSlugs.add(normText(tp.slug));
+      const slug = cleanStr(tp.slug);
+      if (slug) {
+        const normalizedSlug = normText(slug);
+        if (!topicPageSlugs.has(normalizedSlug)) {
+          topicPageSlugs.set(normalizedSlug, slug);
+        }
       }
     });
 
@@ -1241,15 +1345,18 @@ const getAllDynamicSections = async (req, res) => {
       if (merchTags && Array.isArray(merchTags)) {
         merchTags.forEach((tag) => {
           const normalizedTag = normText(tag);
-          if (topicPageSlugs.has(normalizedTag)) {
-            matchingValues.add(normalizedTag);
+          const topicSlug = topicPageSlugs.get(normalizedTag);
+          if (topicSlug) {
+            matchingValues.add(topicSlug);
           }
         });
       }
     });
 
     // Convert to array and sort
-    const sectionNames = Array.from(matchingValues).sort();
+    const sectionNames = Array.from(matchingValues).sort((left, right) =>
+      left.localeCompare(right, undefined, { sensitivity: "base" }),
+    );
 
     // Return only section names
     res.json({

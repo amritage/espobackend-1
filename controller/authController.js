@@ -55,7 +55,7 @@ function isValidEmail(email) {
 /**
  * Request OTP - Send OTP code to user's email
  */
-const requestOtp = async (req, res) => {
+const _requestOtp = async (req, res) => {
   try {
     const email = String(req.body.email || "")
       .trim()
