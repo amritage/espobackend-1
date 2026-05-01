@@ -1,6 +1,14 @@
 const express = require("express");
 
 const { handleChatMessage } = require("../controller/chatController");
+const { createRateLimit } = require("../middleware/rateLimit");
+
+const chatLimiter = createRateLimit({
+  windowMs: Number(process.env.CHAT_RATE_LIMIT_WINDOW_MS || 5 * 60 * 1000),
+  limit: Number(process.env.CHAT_RATE_LIMIT_MAX || 30),
+  keyPrefix: "chat",
+  message: "Too many chat requests. Please try again later.",
+});
 
 /**
  * Chat routes
@@ -18,7 +26,7 @@ function createChatRoutes() {
     res.json({ ok: true, feature: "chat" });
   });
 
-  router.post("/message", handleChatMessage);
+  router.post("/message", chatLimiter, handleChatMessage);
 
   return router;
 }

@@ -244,6 +244,12 @@ app.get("/health", (req, res) => {
       maxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 10,
       windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 1000,
       requestTimeout: parseInt(process.env.REQUEST_TIMEOUT_MS) || 30000,
+      authWindowMs:
+        parseInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+      authMax: parseInt(process.env.AUTH_RATE_LIMIT_MAX) || 20,
+      chatWindowMs:
+        parseInt(process.env.CHAT_RATE_LIMIT_WINDOW_MS) || 5 * 60 * 1000,
+      chatMax: parseInt(process.env.CHAT_RATE_LIMIT_MAX) || 30,
     },
   });
 });

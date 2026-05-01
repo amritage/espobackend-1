@@ -1,5 +1,6 @@
 const express = require("express");
 const router = express.Router();
+const { requireAdminToken } = require("../middleware/requireAdminToken");
 const {
   triggerManualIndexNow,
   testSitemapParsing,
@@ -10,12 +11,13 @@ const {
  * GET /indexnow/health
  */
 router.get("/health", (req, res) => {
-  const sitemapUrl = `${process.env.FRONTEND_URL}/sitemap.xml`;
+  const frontendUrl = String(process.env.FRONTEND_URL || "").trim();
+  const sitemapUrl = frontendUrl ? `${frontendUrl}/sitemap.xml` : null;
 
   const config = {
     schedulerEnabled: process.env.INDEXNOW_SCHEDULER_ENABLED === "true",
     endpoint: "https://api.indexnow.org/indexnow",
-    host: process.env.FRONTEND_URL.replace(/^https?:\/\//, ""),
+    host: frontendUrl ? frontendUrl.replace(/^https?:\/\//, "") : null,
     keyConfigured: !!process.env.INDEXNOW_KEY,
     sitemapUrl: sitemapUrl,
     schedule: process.env.INDEXNOW_SCHEDULE || "0 2 * * *",
@@ -43,7 +45,7 @@ router.get("/health", (req, res) => {
  * Get IndexNow key file content (for debugging)
  * GET /indexnow/key
  */
-router.get("/key", (req, res) => {
+router.get("/key", requireAdminToken, (req, res) => {
   if (!process.env.INDEXNOW_KEY) {
     return res.status(404).json({
       ok: false,
@@ -69,26 +71,13 @@ router.get("/key", (req, res) => {
  * Manual trigger for scheduled IndexNow (for testing)
  * POST /indexnow/trigger
  */
-router.post("/trigger", async (req, res) => {
+router.post("/trigger", requireAdminToken, async (req, res) => {
   try {
     if (process.env.INDEXNOW_SCHEDULER_ENABLED !== "true") {
       return res.status(200).json({
         ok: true,
         disabled: true,
         message: "IndexNow scheduler is disabled",
-      });
-    }
-
-    // Optional: Protect this endpoint with a token
-    const authToken =
-      req.headers["x-indexnow-token"] || req.headers["authorization"];
-    if (
-      process.env.INDEXNOW_AUTH_TOKEN &&
-      authToken !== process.env.INDEXNOW_AUTH_TOKEN
-    ) {
-      return res.status(403).json({
-        ok: false,
-        error: "Unauthorized",
       });
     }
 
@@ -117,7 +106,7 @@ router.post("/trigger", async (req, res) => {
  * Test sitemap parsing (for debugging)
  * GET /indexnow/test-sitemap
  */
-router.get("/test-sitemap", async (req, res) => {
+router.get("/test-sitemap", requireAdminToken, async (req, res) => {
   try {
     if (process.env.INDEXNOW_SCHEDULER_ENABLED !== "true") {
       return res.status(200).json({

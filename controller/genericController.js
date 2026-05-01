@@ -64,6 +64,17 @@ function toPositiveNumber(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function intInRange(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return Math.min(max, Math.max(min, Math.floor(fallback)));
+  }
+  const normalized = Math.floor(n);
+  if (normalized < min) return min;
+  if (normalized > max) return max;
+  return normalized;
+}
+
 // Helper: Parse EspoCRM date string to milliseconds
 function parseEspoDateMs(value) {
   if (!value) return 0;
@@ -98,6 +109,25 @@ function getMaxModifiedAt(records) {
 
   return maxValue;
 }
+
+const PUBLIC_API_DEFAULT_LIMIT = intInRange(
+  process.env.PUBLIC_API_DEFAULT_LIMIT,
+  20,
+  1,
+  100,
+);
+const PUBLIC_API_MAX_LIMIT = intInRange(
+  process.env.PUBLIC_API_MAX_LIMIT,
+  100,
+  1,
+  500,
+);
+const PUBLIC_API_MAX_PAGE = intInRange(
+  process.env.PUBLIC_API_MAX_PAGE,
+  100000,
+  1,
+  1000000,
+);
 
 // Helper: Fetch records with pagination
 async function fetchRecordsPaged(entityName, { orderBy, order, select, where } = {}) {
@@ -585,8 +615,13 @@ const createEntityController = (entityName) => {
   // Get all records
   const getAllRecords = async (req, res) => {
     try {
-      const page = Number(req.query.page || 1);
-      const limit = Number(req.query.limit || 20);
+      const page = intInRange(req.query.page, 1, 1, PUBLIC_API_MAX_PAGE);
+      const limit = intInRange(
+        req.query.limit,
+        PUBLIC_API_DEFAULT_LIMIT,
+        1,
+        PUBLIC_API_MAX_LIMIT,
+      );
       const offset = (page - 1) * limit;
 
       const populate =
@@ -824,8 +859,13 @@ const createEntityController = (entityName) => {
         });
       }
 
-      const page = Number(req.query.page || 1);
-      const limit = Number(req.query.limit || 20);
+      const page = intInRange(req.query.page, 1, 1, PUBLIC_API_MAX_PAGE);
+      const limit = intInRange(
+        req.query.limit,
+        PUBLIC_API_DEFAULT_LIMIT,
+        1,
+        PUBLIC_API_MAX_LIMIT,
+      );
       const offset = (page - 1) * limit;
 
       const populate =
@@ -961,8 +1001,13 @@ const createEntityController = (entityName) => {
         });
       }
 
-      const page = Number(req.query.page || 1);
-      const limit = Number(req.query.limit || 20);
+      const page = intInRange(req.query.page, 1, 1, PUBLIC_API_MAX_PAGE);
+      const limit = intInRange(
+        req.query.limit,
+        PUBLIC_API_DEFAULT_LIMIT,
+        1,
+        PUBLIC_API_MAX_LIMIT,
+      );
       const offset = (page - 1) * limit;
 
       const searchTerm = normText(searchValue);

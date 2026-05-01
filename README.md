@@ -63,6 +63,10 @@ espobackend/
 │   ├── indexnow.js                 # IndexNow management routes
 │   └── cache.js                    # Cache management routes
 │
+├── middleware/
+│   ├── requireAdminToken.js        # Admin token protection
+│   └── rateLimit.js                # In-memory per-IP route limiting
+│
 └── utils/
     ├── cache.js                    # Cache read/write/delete/stats helpers
     ├── cacheWarmer.js              # Startup cache warm-up and scheduled refresh
@@ -115,6 +119,13 @@ Copy `.env.example` to `.env` and fill in your values. All variables are documen
 | `PRIVATE_ESPO_ENTITIES` | Optional | Admin-only entity names, if you intentionally enable private reads |
 | `ESPO_ENTITIES` | Optional | Backward-compatible fallback for public entity routing |
 | `FRONTEND_URL` | ✅ | Primary frontend URL (CORS, sitemap, and frontend links) |
+| `AUTH_RATE_LIMIT_WINDOW_MS` | Optional | Per-IP auth window in milliseconds |
+| `AUTH_RATE_LIMIT_MAX` | Optional | Per-IP auth requests allowed per window |
+| `CHAT_RATE_LIMIT_WINDOW_MS` | Optional | Per-IP chat window in milliseconds |
+| `CHAT_RATE_LIMIT_MAX` | Optional | Per-IP chat requests allowed per window |
+| `PUBLIC_API_DEFAULT_LIMIT` | Optional | Default page size for public list/search endpoints |
+| `PUBLIC_API_MAX_LIMIT` | Optional | Maximum allowed page size for public list/search endpoints |
+| `PUBLIC_API_MAX_PAGE` | Optional | Maximum allowed page number for public list/search endpoints |
 | `OPENAI_API_KEY` | ⚠️ Optional | Enables AI chat; falls back to heuristic if missing |
 | `GMAIL_USER` | ⚠️ Optional | Gmail address for OTP emails |
 | `GMAIL_APP_PASSWORD` | ⚠️ Optional | Gmail App Password for OTP emails |
@@ -143,16 +154,16 @@ All routes are mounted under `/api`. Entity names from `PUBLIC_ESPO_ENTITIES` (o
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/auth/register` | Register new account, sends OTP |
-| `POST` | `/api/auth/login` | Login with email, sends OTP |
-| `POST` | `/api/auth/verify-otp` | Verify OTP code |
+| `POST` | `/api/auth/register` | Register new account, sends OTP, rate-limited per IP |
+| `POST` | `/api/auth/login` | Login with email, sends OTP, rate-limited per IP |
+| `POST` | `/api/auth/verify-otp` | Verify OTP code, rate-limited per IP |
 | `GET` | `/api/auth/health` | Auth service health check |
 
 ### Chat Routes
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/chat/message` | Send message to public AI chat assistant |
+| `POST` | `/api/chat/message` | Send message to public AI chat assistant, rate-limited per IP |
 | `GET` | `/api/chat/health` | Chat service health check |
 
 ### Admin Chat Routes
@@ -174,9 +185,9 @@ All routes are mounted under `/api`. Entity names from `PUBLIC_ESPO_ENTITIES` (o
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/indexnow/health` | Check IndexNow configuration |
-| `GET` | `/api/indexnow/key` | Get IndexNow key info |
-| `POST` | `/api/indexnow/trigger` | Manually trigger IndexNow submission |
-| `GET` | `/api/indexnow/test-sitemap` | Test sitemap URL parsing |
+| `GET` | `/api/indexnow/key` | Get IndexNow key info (admin token required) |
+| `POST` | `/api/indexnow/trigger` | Manually trigger IndexNow submission (admin token required) |
+| `GET` | `/api/indexnow/test-sitemap` | Test sitemap URL parsing (admin token required) |
 
 ### Cache Routes
 
@@ -260,7 +271,7 @@ The largest controller — handles read-only entity access, search, filtering, c
   - Does a delta refresh (only records changed since last fetch) if cache exists but is stale
   - Does a full refresh if cache is too old (beyond `ESPO_FULL_REFRESH_SECONDS`)
 - **`createEntityController(entityName)`** — factory that returns all route handlers for an entity:
-  - `getAllRecords` — paginated list; CProduct filters by `merchTags=ecatalogue`; CBlog filters by `status=Approved` and `publishedAt <= now`
+  - `getAllRecords` — paginated list with clamped `page` / `limit`; CProduct filters by `merchTags=ecatalogue`; CBlog filters by `status=Approved` and `publishedAt <= now`
   - `getRecordById` — single record with cache
   - `getRecordsByFieldValue` — scans all records with loose Unicode-normalized comparison
   - `getUniqueFieldValues` — returns sorted unique values for any field across all records
@@ -328,7 +339,7 @@ Route factory for read-only entity endpoints. For each entity:
 
 ### `routes/chat.js`
 
-Mounts the public chat routes on an Express router. Returns a factory function `createChatRoutes()` so a fresh router instance is created per API base name. Routes: `GET /health` and `POST /message`.
+Mounts the public chat routes on an Express router. Returns a factory function `createChatRoutes()` so a fresh router instance is created per API base name. Routes: `GET /health` and `POST /message`, with per-IP rate limiting on message submission.
 
 ---
 
@@ -340,7 +351,7 @@ Mounts the admin chat routes. Same factory pattern as `routes/chat.js`. Routes: 
 
 ### `routes/auth.js`
 
-Mounts OTP auth routes: `POST /register`, `POST /login`, `POST /verify-otp`, `GET /health`.
+Mounts OTP auth routes: `POST /register`, `POST /login`, `POST /verify-otp`, `GET /health`, with per-IP rate limiting on the POST routes.
 
 ---
 
@@ -355,9 +366,15 @@ Mounts dynamic section routes with CDN cache headers (`s-maxage=300`). Routes: `
 Mounts IndexNow management routes:
 
 - `GET /health` — validates all required IndexNow config is present
-- `GET /key` — returns the key value and instructions for placing the key file on the frontend
-- `POST /trigger` — manually triggers a full sitemap fetch + IndexNow submission (protected by optional `INDEXNOW_AUTH_TOKEN`)
-- `GET /test-sitemap` — fetches and parses the sitemap, returns found URLs for debugging
+- `GET /key` — returns the key value and instructions for placing the key file on the frontend (admin token required)
+- `POST /trigger` — manually triggers a full sitemap fetch + IndexNow submission (admin token required)
+- `GET /test-sitemap` — fetches and parses the sitemap, returns found URLs for debugging (admin token required)
+
+---
+
+### `middleware/rateLimit.js`
+
+Simple in-memory per-IP request limiting used by the public auth and chat endpoints. It sets basic rate-limit headers and returns `429` when a client exceeds the configured window.
 
 ---
 
