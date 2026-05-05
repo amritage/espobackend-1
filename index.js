@@ -220,13 +220,16 @@ app.get("/", (req, res) => {
     message: "EspoCRM API Server is running!",
     entities: publicEntities,
     availableRoutes: availableRoutes,
-    mode: "read-only",
+    mode: "public-read-admin-write",
     apiStructure: {
       "GET /api/dynamicsection": "To get all the dynamic section value",
       "GET /api/dynamicsection/:merchtag value":
         "To get all the dynamic section value as dynamic",
       "GET /:base/:entity": "Get all records",
       "GET /:base/:entity/:id": "Get record by ID",
+      "POST /:base/:entity": "Create record (admin token required)",
+      "PUT /:base/:entity/:id": "Update record (admin token required)",
+      "DELETE /:base/:entity/:id": "Delete record (admin token required)",
       "GET /:base/:entity/fieldname/:fieldName": "Get unique field values",
       "GET /:base/:entity/fieldname/:fieldName/:fieldValue":
         "Get records by field value",

@@ -1153,12 +1153,24 @@ function scoreProduct(p, query) {
   const name = norm(pickFirstNonEmpty(p.name, p.productTitle));
   const slug = norm(p.productslug);
   const code = norm(getFabricCode(p));
+  const normFlex = (s) => s.replace(/[-\s]+/g, "");
+  const nameFlex = normFlex(name);
+  const slugFlex = normFlex(slug);
+  const codeFlex = normFlex(code);
 
   for (const t of uniq) {
     if (!t) continue;
+    const tFlex = normFlex(t);
+
     if (name.includes(t)) score += 6;
     if (slug.includes(t)) score += 5;
     if (code && code.includes(t)) score += 7;
+    if (tFlex.length >= 3) {
+      if (nameFlex.includes(tFlex)) score += 5;
+      if (slugFlex.includes(tFlex)) score += 4;
+      if (codeFlex && codeFlex.includes(tFlex)) score += 6;
+    }
+    if (code && (code === t || codeFlex === tFlex)) score += 15;
   }
 
   if (query?.color) {
@@ -1634,6 +1646,91 @@ function pickDisplayPairs(entity, rec) {
   return pairs;
 }
 
+function buildProductDetailsReply(p) {
+  if (!p) return "I couldn't find details for that product.";
+
+  const lines = [];
+  const title = pickFirstNonEmpty(p.productTitle, p.name, getFabricCode(p));
+  if (title) lines.push(title);
+  if (p.productTagline) lines.push(cleanStr(p.productTagline));
+
+  const specs = [];
+  const code = getFabricCode(p);
+  if (code) specs.push(["Fabric Code", code]);
+
+  const content = toArr(p.content).filter(Boolean).join(", ");
+  if (content) specs.push(["Material", content]);
+
+  const weight = [
+    p.gsm ? `${cleanStr(p.gsm)} GSM` : "",
+    p.ozs ? `${cleanStr(p.ozs)} oz` : "",
+  ]
+    .filter(Boolean)
+    .join(" / ");
+  if (weight) specs.push(["Weight", weight]);
+
+  const width = [
+    p.cm ? `${cleanStr(p.cm)} cm` : "",
+    p.inch ? `${cleanStr(p.inch)} inch` : "",
+  ]
+    .filter(Boolean)
+    .join(" / ");
+  if (width) specs.push(["Width", width]);
+
+  const structure = toArr(p.structure).filter(Boolean).join(", ");
+  if (structure) specs.push(["Weave", structure]);
+
+  const design = cleanStr(p.design);
+  if (design && design !== "N/A") specs.push(["Design", design]);
+
+  const colors = toArr(p.color).filter(Boolean).join(", ");
+  if (colors) specs.push(["Color", colors]);
+
+  const finish = toArr(p.finish).filter(Boolean).join(", ");
+  if (finish) specs.push(["Finish", finish]);
+
+  if (p.category) specs.push(["Category", cleanStr(p.category)]);
+
+  if (specs.length) {
+    lines.push("", "### Technical Specifications");
+    specs.forEach(([label, value]) => lines.push(`- **${label}:** ${value}`));
+  }
+
+  const supply = [];
+  if (p.salesMOQ) {
+    supply.push(["MOQ", `${cleanStr(p.salesMOQ)} ${cleanStr(p.uM || "")}`.trim()]);
+  }
+  if (p.supplyModel) supply.push(["Supply Model", cleanStr(p.supplyModel)]);
+  if (p.collectionName) supply.push(["Collection", cleanStr(p.collectionName)]);
+
+  if (supply.length) {
+    lines.push("", "### Supply & Ordering");
+    supply.forEach(([label, value]) => lines.push(`- **${label}:** ${value}`));
+  }
+
+  const suitability = toArr(p.suitability).filter(Boolean);
+  if (suitability.length) {
+    lines.push("", "### Best Suited For");
+    suitability.slice(0, 8).forEach((item) => {
+      lines.push(`- ${cleanStr(item)}`);
+    });
+  }
+
+  const shortDesc = cleanStr(p.shortProductDescription);
+  if (shortDesc) {
+    lines.push("", "### About", shortDesc);
+  }
+
+  if (p.ratingValue && p.ratingCount) {
+    lines.push("", `Rating: ${p.ratingValue}/5 (${p.ratingCount} reviews)`);
+  }
+
+  const url = getFrontendUrlForProduct(p);
+  if (url) lines.push("", `View full details: ${url}`);
+
+  return lines.join("\n");
+}
+
 function buildNonProductDetailsReply(entity, rec) {
   const title = getItemTitle(entity, rec) || `${entity} info`;
   const lines = [title];
@@ -1720,7 +1817,11 @@ async function handleChatMessage(req, res) {
     };
   }
 
-  const intent = action?.intent || "unknown";
+  const rawIntent = action?.intent || "unknown";
+  const hasProductKeywords =
+    Array.isArray(action?.query?.keywords) &&
+    action.query.keywords.some((keyword) => cleanStr(keyword).length >= 3);
+  let intent = rawIntent;
   const detail = normalizeDetail(action?.detail, mode);
   const language = cleanStr(action?.language) || "auto";
 
@@ -1743,12 +1844,14 @@ async function handleChatMessage(req, res) {
   if (userAgent) mergedContact.cUserAgent = userAgent;
 
   // 3) Preserve trusted lead state
+  const turnNumber = Number(context?.turnNumber || 0) + 1;
   const nextContext = {
     ...context,
     contactInfo: mergedContact,
     leadId: trustedLeadId || null,
     lastIntent: intent,
     lastItems: Array.isArray(context?.lastItems) ? context.lastItems : [],
+    turnNumber,
   };
 
   // 4) Upsert Lead (return debug)
@@ -1768,7 +1871,6 @@ async function handleChatMessage(req, res) {
   // ✅ ensure leadId gets set even if caller didn’t mutate context somehow
   if (leadUpsert?.ok && leadUpsert?.id) nextContext.leadId = leadUpsert.id;
 
-  const clientContext = buildClientContext(nextContext);
   const clientLeadUpsert = sanitizeLeadUpsertForClient(leadUpsert);
 
   // 5) Fetch multi-entity knowledge
@@ -1811,25 +1913,49 @@ async function handleChatMessage(req, res) {
   const topProductScore = rankedProducts[0]?.score || 0;
 
   const minScore = Number(process.env.CHAT_MIN_SCORE || 10);
+  const detailsMinScore = Math.max(2, Math.floor(minScore / 3));
   const hasAnyMatch = !!topAll && topAllScore >= minScore;
   const hasProductMatch = !!topProduct && topProductScore >= minScore;
+  const hasWeakProductMatch =
+    !!topProduct &&
+    topProductScore >= detailsMinScore &&
+    topProductScore < minScore;
+
+  if (rawIntent === "lead" && hasProductKeywords && hasProductMatch) {
+    intent = "details";
+  }
+  nextContext.lastIntent = intent;
 
   const lastItems = Array.isArray(nextContext?.lastItems)
     ? nextContext.lastItems
     : [];
   const refersToPrev = !!action?.refersToPrevious;
 
-  let focused = topAll;
+  const itemMap = new Map(
+    rankedAll.map(({ it }) => [itemKey(it.entity, it.id), it]),
+  );
 
-  if (refersToPrev && lastItems.length) {
+  function resolveLastFocused() {
+    if (!lastItems.length) return null;
     const wanted = lastItems[0];
     const key = itemKey(wanted?.entity, wanted?.id);
-    if (key) {
-      const map = new Map(
-        rankedAll.map(({ it }) => [itemKey(it.entity, it.id), it]),
-      );
-      focused = map.get(key) || topAll;
+    return key ? itemMap.get(key) || null : null;
+  }
+
+  let focused = null;
+
+  if (intent === "details") {
+    if (topProductScore >= detailsMinScore) {
+      focused = topProduct;
+    } else if (refersToPrev || !hasProductKeywords) {
+      focused = resolveLastFocused();
+      if (!focused && !hasProductKeywords) {
+        intent = "recommend";
+        nextContext.lastIntent = intent;
+      }
     }
+  } else {
+    focused = refersToPrev ? resolveLastFocused() || topAll : topAll;
   }
 
   const suggestions = rankedProducts
@@ -1890,13 +2016,36 @@ async function handleChatMessage(req, res) {
     }
   }
 
+  const availableCategories = Array.from(
+    new Set(
+      items
+        .filter((it) => it.entity === "CProduct")
+        .map((it) => cleanStr(it.record?.category))
+        .filter(Boolean),
+    ),
+  ).sort((left, right) =>
+    left.localeCompare(right, undefined, { sensitivity: "base" }),
+  );
+
   let baseReply = "";
   if (intent === "availability") {
     baseReply = hasProductMatch
-      ? "Yes — we have matching fabrics in our catalogue. Do you want details?"
-      : "I couldn’t find an exact match in our catalogue. Can you share GSM, content (cotton/poly), and weave (poplin/twill/denim)?";
+      ? "Yes, we have matching fabrics in our catalogue. Do you want details?"
+      : "I couldn't find an exact match in our catalogue. Can you share GSM, content (cotton/poly), and weave (poplin/twill/denim)?";
   } else if (intent === "recommend") {
-    if (hasProductMatch) {
+    const hasFilters =
+      hasProductKeywords ||
+      !!query?.color ||
+      !!query?.weave ||
+      !!query?.structure ||
+      toArr(query?.content).length > 0;
+
+    if (!hasFilters) {
+      const categoryList = availableCategories.length
+        ? availableCategories.map((category) => `- ${category}`).join("\n")
+        : "- Woven Fabrics\n- Knit Fabrics\n- Denim";
+      baseReply = `We carry products across these categories:\n\n${categoryList}\n\nWhich category are you interested in? You can also tell me a color, GSM, or fabric type.`;
+    } else if (hasProductMatch) {
       const top3 = rankedProducts
         .filter((x) => x.score > 0)
         .slice(0, 3)
@@ -1910,48 +2059,48 @@ async function handleChatMessage(req, res) {
           const code = getFabricCode(p);
           const url = getFrontendUrlForProduct(p);
           const meta = [
-            cleanStr(p.category),
+            toArr(p.content).filter(Boolean).join(", "),
+            toArr(p.structure).filter(Boolean).join(", "),
             p.gsm ? `${cleanStr(p.gsm)} GSM` : "",
             toArr(p.color).slice(0, 2).join(", "),
           ]
             .filter(Boolean)
-            .join(" · ");
-          return `• ${title}${meta ? ` — ${meta}` : ""}\n  Fabric Code: ${code || "-"}\n  ${url || ""}`.trim();
+            .join(" | ");
+          return [
+            `- ${title}`,
+            `  Code: ${code || "-"}`,
+            meta ? `  ${meta}` : "",
+            p.supplyModel ? `  Supply: ${cleanStr(p.supplyModel)}` : "",
+            url ? `  ${url}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n");
         });
 
-      baseReply = `Here are a few matching options:\n${top3.join("\n")}\n\nWant details for the best match?`;
+      baseReply = `Here are matching options:\n\n${top3.join("\n\n")}\n\nWant full details on any of these?`;
     } else {
-      baseReply =
-        "I couldn’t find close matches. Tell me color, GSM range, content, and end-use (shirts/dresses/uniforms).";
+      const categoryList = availableCategories.length
+        ? availableCategories.map((category) => `- ${category}`).join("\n")
+        : "";
+      baseReply = `I couldn't find close matches. We carry:\n\n${categoryList}\n\nCould you tell me the color, GSM range, content, and end-use you need?`;
     }
   } else if (intent === "details") {
     if (!focused) {
-      baseReply =
-        "Which item should I describe? Share the name/title (or a keyword).";
+      const top3Suggestions = rankedProducts
+        .filter((x) => x.score > 0)
+        .slice(0, 3)
+        .map(({ it }) => {
+          const p = it.record;
+          const code = getFabricCode(p);
+          const title = pickFirstNonEmpty(p.productTitle, p.name, code);
+          return `- ${code ? `${code} - ` : ""}${title}`;
+        });
+
+      baseReply = top3Suggestions.length
+        ? `I couldn't find an exact match for that product. Here are some close options:\n\n${top3Suggestions.join("\n")}\n\nCould you confirm the product code or name?`
+        : "I couldn't find that product in our catalogue. Could you double-check the name or code?";
     } else if (focused.entity === "CProduct") {
-      const p = focused.record;
-      const lines = [];
-      lines.push(pickFirstNonEmpty(p.productTitle, p.name, getFabricCode(p)));
-      const code = getFabricCode(p);
-      if (code) lines.push(`Fabric Code: ${code}`);
-
-      const bits = [];
-      if (p.category) bits.push(cleanStr(p.category));
-      if (p.gsm) bits.push(`${cleanStr(p.gsm)} GSM`);
-      const content = toArr(p.content).filter(Boolean).join(", ");
-      if (content) bits.push(content);
-      const structure = toArr(p.structure).filter(Boolean).join(", ");
-      if (structure) bits.push(structure);
-      const finish = toArr(p.finish).filter(Boolean).join(", ");
-      if (finish) bits.push(finish);
-      const colors = toArr(p.color).filter(Boolean).slice(0, 4).join(", ");
-      if (colors) bits.push(colors);
-      if (bits.length) lines.push(bits.join(" · "));
-
-      const url = getFrontendUrlForProduct(p);
-      if (url) lines.push(url);
-
-      baseReply = lines.join("\n");
+      baseReply = buildProductDetailsReply(focused.record);
     } else {
       baseReply = buildNonProductDetailsReply(focused.entity, focused.record);
     }
@@ -1959,13 +2108,13 @@ async function handleChatMessage(req, res) {
     if (hasAnyMatch && topAll) {
       if (topAll.entity === "CProduct") {
         baseReply =
-          "Tell me what fabric you’re looking for (color, weave/structure, GSM, content). I’ll check our catalogue.";
+          "Tell me what fabric you're looking for (color, weave/structure, GSM, content). I'll check our catalogue.";
       } else {
         baseReply = buildNonProductDetailsReply(topAll.entity, topAll.record);
       }
     } else {
       baseReply =
-        "Tell me what you’re looking for (fabric details or company-related query). I’ll check and respond.";
+        "Tell me what you're looking for (fabric details or company-related query). I'll check and respond.";
     }
   }
 
@@ -1980,18 +2129,88 @@ async function handleChatMessage(req, res) {
   if (openaiAvailable) {
     try {
       const extra = getChatExtraInstructions();
+      let productDataSection = "";
+      const focusedProduct =
+        focused?.entity === "CProduct" ? focused.record : null;
+      const lastProductInContext =
+        nextContext?.lastProduct || context?.lastProduct || null;
+
+      if (intent === "details" && focusedProduct) {
+        const p = focusedProduct;
+        const productFacts = {
+          title: pickFirstNonEmpty(p.productTitle, p.name, getFabricCode(p)),
+          tagline: cleanStr(p.productTagline),
+          fabricCode: getFabricCode(p),
+          material: toArr(p.content).filter(Boolean).join(", "),
+          gsm: p.gsm,
+          ozs: p.ozs,
+          widthCm: p.cm,
+          widthInch: p.inch,
+          weave: toArr(p.structure).filter(Boolean).join(", "),
+          design: cleanStr(p.design),
+          color: toArr(p.color).filter(Boolean).join(", "),
+          finish: toArr(p.finish).filter(Boolean).join(", "),
+          category: cleanStr(p.category),
+          collection: cleanStr(p.collectionName),
+          moq: p.salesMOQ
+            ? `${cleanStr(p.salesMOQ)} ${cleanStr(p.uM || "")}`.trim()
+            : null,
+          supplyModel: cleanStr(p.supplyModel),
+          suitability: toArr(p.suitability).filter(Boolean).slice(0, 8),
+          shortDescription: cleanStr(p.shortProductDescription),
+          ratingValue: p.ratingValue,
+          ratingCount: p.ratingCount,
+          productUrl: getFrontendUrlForProduct(p),
+          productQ1: cleanStr(p.productQ1),
+          productA1: cleanStr(p.productA1),
+          productQ2: cleanStr(p.productQ2),
+          productA2: cleanStr(p.productA2),
+          productQ3: cleanStr(p.productQ3),
+          productA3: cleanStr(p.productA3),
+          productQ4: cleanStr(p.productQ4),
+          productA4: cleanStr(p.productA4),
+          productQ5: cleanStr(p.productQ5),
+          productA5: cleanStr(p.productA5),
+          productQ6: cleanStr(p.productQ6),
+          productA6: cleanStr(p.productA6),
+        };
+        Object.keys(productFacts).forEach((key) => {
+          if (
+            productFacts[key] === null ||
+            productFacts[key] === "" ||
+            productFacts[key] === undefined
+          ) {
+            delete productFacts[key];
+          }
+        });
+        productDataSection = `\n\nFullProductData: ${safeJson(productFacts)}`;
+      } else if (lastProductInContext) {
+        productDataSection = `\n\nLastDiscussedProduct: ${safeJson(lastProductInContext)}`;
+      }
 
       const system =
-        "You are a helpful fabric catalogue assistant.\n" +
+        "You are a helpful, friendly fabric catalogue assistant for Amrita Global Enterprise.\n" +
         "Reply in the SAME language as the user.\n" +
-        "Be natural and human.\n" +
-        "Do NOT output JSON.\n" +
-        "Use only the facts in ReplyPlan.\n" +
+        "Be concise and professional, like a knowledgeable sales rep.\n" +
+        "Do NOT output JSON or raw code.\n" +
+        `This is turn number ${turnNumber} of the conversation.\n` +
+        (turnNumber === 1
+          ? "GREETING: This is the first message. Greet the user briefly if it fits.\n"
+          : "NO GREETING: This is not the first message. Do not re-introduce yourself.\n") +
+        "CONVERSATION CONTINUITY: If LastDiscussedProduct is provided, the user is still talking about that product.\n" +
+        "PRODUCT NOT FOUND: If ReplyPlan says it couldn't find the product, do not invent product details.\n" +
+        "CATEGORY LISTING: If ReplyPlan lists categories, show them as a clean bullet list and ask which one the user wants.\n" +
+        "Use markdown formatting for product details: headings, bold labels, and bullet lists.\n" +
+        "Use only the facts from ReplyPlan and FullProductData. Do not invent specs.\n" +
         "If ContactQuestion is present, ask ONLY that ONE question at the end." +
-        (extra ? `\n\n---\nExtra instructions (from env):\n${extra}` : "");
+        (extra ? `\n\n---\nExtra instructions:\n${extra}` : "");
 
-      const user = `User message: ${message}\n\nReplyPlan: ${safeJson(plan)}\n\nContactQuestion: ${askOne}`;
-      replyText = await openaiText(system, user, 420);
+      const user =
+        `User message: ${message}\n\n` +
+        `ReplyPlan: ${safeJson(plan)}` +
+        productDataSection +
+        `\n\nContactQuestion: ${askOne}`;
+      replyText = await openaiText(system, user, 600);
       openaiReplyOk = true;
     } catch {
       replyText = baseReply + (askOne ? `\n\n${askOne}` : "");
@@ -1999,6 +2218,8 @@ async function handleChatMessage(req, res) {
   } else {
     replyText = baseReply + (askOne ? `\n\n${askOne}` : "");
   }
+
+  const clientContext = buildClientContext(nextContext);
 
   const out = {
     ok: true,
@@ -2009,7 +2230,10 @@ async function handleChatMessage(req, res) {
     meta: {
       ts: nowIso(),
       intent,
+      rawIntent,
+      turnNumber,
       topScore: topAllScore,
+      hasWeakProductMatch,
 
       openaiUsed: !!(openaiParseOk || openaiReplyOk),
       openaiParseOk,

@@ -91,6 +91,8 @@ const optionalEnvVars = [
   "CORS_ORIGIN",
   "RATE_LIMIT_MAX_REQUESTS",
   "CACHE_REFRESH_INTERVAL_HOURS",
+  "FRONTEND_B_REVALIDATE_URL",
+  "REVALIDATE_SECRET",
 ];
 
 requiredEnvVars.forEach((envVar) => {

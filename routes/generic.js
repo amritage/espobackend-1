@@ -1,5 +1,6 @@
 const express = require("express");
 const { createEntityController } = require("../controller/genericController");
+const { requireAdminToken } = require("../middleware/requireAdminToken");
 
 // Parse no-cache entities from environment
 const noCacheEntities = String(process.env.NO_CACHE_ENTITIES || "")
@@ -88,6 +89,11 @@ const createEntityRoutes = (entityName) => {
 
   // GET /:entity/:id - Get single record by ID
   router.get("/:id", publicCache(entityName), controller.getRecordById);
+
+  // Admin-only write routes
+  router.post("/", requireAdminToken, controller.createRecord);
+  router.put("/:id", requireAdminToken, controller.updateRecord);
+  router.delete("/:id", requireAdminToken, controller.deleteRecord);
 
   return router;
 };

@@ -4,7 +4,9 @@ const {
   getCacheKey,
   getCache,
   setCache,
+  deleteCacheByEntity,
 } = require("../utils/cache");
+const { revalidateFrontends } = require("../utils/revalidateFrontends");
 const { applyCloudinaryVariants } = require("../utils/cloudinary");
 
 /* ------------------------------ ENV helpers ------------------------------ */
@@ -930,6 +932,59 @@ const createEntityController = (entityName) => {
     }
   };
 
+  const createRecord = async (req, res) => {
+    try {
+      const data = await espoRequest(`/${entityName}`, {
+        method: "POST",
+        body: req.body,
+      });
+
+      deleteCacheByEntity(entityName);
+      await revalidateFrontends();
+
+      res.json({ success: true, data, entity: entityName });
+    } catch (e) {
+      res
+        .status(e.status || 500)
+        .json({ success: false, error: e.data || e.message });
+    }
+  };
+
+  const updateRecord = async (req, res) => {
+    try {
+      const data = await espoRequest(`/${entityName}/${req.params.id}`, {
+        method: "PUT",
+        body: req.body,
+      });
+
+      deleteCacheByEntity(entityName);
+      await revalidateFrontends();
+
+      res.json({ success: true, data, entity: entityName });
+    } catch (e) {
+      res
+        .status(e.status || 500)
+        .json({ success: false, error: e.data || e.message });
+    }
+  };
+
+  const deleteRecord = async (req, res) => {
+    try {
+      await espoRequest(`/${entityName}/${req.params.id}`, {
+        method: "DELETE",
+      });
+
+      deleteCacheByEntity(entityName);
+      await revalidateFrontends();
+
+      res.json({ success: true, entity: entityName });
+    } catch (e) {
+      res
+        .status(e.status || 500)
+        .json({ success: false, error: e.data || e.message });
+    }
+  };
+
   // ✅ Get records by field value (NOW scans ALL records + loose compare)
   const getRecordsByFieldValue = async (req, res) => {
     const { fieldName, fieldValue } = req.params;
@@ -1182,6 +1237,9 @@ const createEntityController = (entityName) => {
   return {
     getAllRecords,
     getRecordById,
+    createRecord,
+    updateRecord,
+    deleteRecord,
     getRecordsByFieldValue,
     getUniqueFieldValues,
     getBySearchProduct,
@@ -1381,4 +1439,5 @@ module.exports = {
   createEntityController,
   getDynamicSection,
   getAllDynamicSections,
+  fetchAllRecords,
 };
